@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>Memory Manager - MacOS</string>
+	<key>CFBundleDisplayName</key>
+	<string>Memory Manager - MacOS</string>
+	<key>CFBundleExecutable</key>
+	<string>MemoryManager</string>
+	<key>CFBundleIdentifier</key>
+	<string>local.memorymanager</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIconName</key>
+	<string>AppIcon</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.utilities</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>NSSupportsAutomaticTermination</key>
+	<false/>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>Memory Manager - MacOS measures how much space your Desktop uses. It only reads file sizes.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>Memory Manager - MacOS measures how much space your Documents folder uses. It only reads file sizes.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>Memory Manager - MacOS measures how much space your Downloads folder uses. It only reads file sizes.</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>Memory Manager - MacOS reports how much space is free on connected volumes.</string>
+</dict>
+</plist>

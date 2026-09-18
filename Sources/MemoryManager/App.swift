@@ -1,0 +1,64 @@
+import SwiftUI
+
+@main
+struct MemoryManagerApp: App {
+    @StateObject private var memory = MemoryModel()
+    @StateObject private var disk = DiskModel()
+
+    var body: some Scene {
+        Window("Memory Manager - MacOS", id: "main") {
+            RootView()
+                .environmentObject(memory)
+                .environmentObject(disk)
+                .frame(minWidth: 860, minHeight: 620)
+                .onAppear { memory.start() }
+                .onDisappear { memory.stop() }
+        }
+        .defaultSize(width: 1000, height: 720)
+        .commands {
+            CommandGroup(after: .toolbar) {
+                Button("Refresh") { memory.refreshNow() }
+                    .keyboardShortcut("r", modifiers: [.command, .shift])
+            }
+        }
+    }
+}
+
+enum AppTab: String, CaseIterable, Identifiable {
+    case memory = "Memory"
+    case storage = "Storage"
+
+    var id: String { rawValue }
+
+    var symbol: String {
+        switch self {
+        case .memory: return "memorychip"
+        case .storage: return "internaldrive"
+        }
+    }
+}
+
+struct RootView: View {
+    @State private var tab: AppTab = .memory
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Picker("", selection: $tab) {
+                ForEach(AppTab.allCases) { item in
+                    Label(item.rawValue, systemImage: item.symbol).tag(item)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 260)
+            .padding(.vertical, 10)
+
+            Divider()
+
+            switch tab {
+            case .memory: MemoryView()
+            case .storage: DiskView()
+            }
+        }
+    }
+}
