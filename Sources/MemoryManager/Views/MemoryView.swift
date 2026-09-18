@@ -6,8 +6,7 @@ struct MemoryView: View {
     @State private var highlighted: String?
     @State private var sortOrder = [KeyPathComparator(\ProcessRow.memory, order: .reverse)]
     @State private var selection: ProcessRow.ID?
-    @State private var pending: PendingKill?
-    @State private var notice: KillNotice?
+    @StateObject private var termination = TerminationCoordinator()
 
     private var segments: [BarSegment] {
         let snapshot = model.snapshot
@@ -33,92 +32,15 @@ struct MemoryView: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .alert(
-            pending.map { $0.asAdmin ? "Authenticate to quit \($0.row.name)?" : confirmTitle($0) } ?? "",
-            isPresented: Binding(get: { pending != nil }, set: { if !$0 { pending = nil } }),
-            presenting: pending
-        ) { kill in
-            Button(kill.force ? "Force Quit" : "Quit", role: .destructive) { perform(kill) }
-            Button("Cancel", role: .cancel) {}
-        } message: { kill in
-            Text(confirmMessage(kill))
+        .processTermination(termination)
+        .onAppear {
+            termination.onCompleted = { [weak model] in model?.refreshNow() }
+            model.start()
         }
-        .alert(
-            "",
-            isPresented: Binding(get: { notice != nil }, set: { if !$0 { notice = nil } }),
-            presenting: notice
-        ) { _ in
-            Button("OK", role: .cancel) {}
-        } message: { notice in
-            Text(notice.text)
-        }
+        .onDisappear { model.stop() }
     }
 
     // MARK: - Terminating
-
-    private func confirmTitle(_ kill: PendingKill) -> String {
-        kill.force ? "Force quit \(kill.row.name)?" : "Quit \(kill.row.name)?"
-    }
-
-    private func confirmMessage(_ kill: PendingKill) -> String {
-        var parts: [String] = []
-        if kill.asAdmin {
-            parts.append(
-                "\(kill.row.name) belongs to \(kill.row.user), so quitting it needs an "
-                + "administrator. macOS will ask for your password."
-            )
-        } else if kill.force {
-            parts.append(
-                "Force quitting ends the process immediately. It will not get a chance to "
-                + "save open work."
-            )
-        } else {
-            parts.append("This asks the process to quit, giving it a chance to save open work.")
-        }
-        if let note = kill.advice.note {
-            parts.append(note)
-        }
-        return parts.joined(separator: "\n\n")
-    }
-
-    private func request(_ row: ProcessRow, force: Bool) {
-        let advice = ProcessKiller.advice(for: row)
-        guard advice.allowsTermination else {
-            notice = KillNotice(text: advice.note ?? "This process cannot be terminated.")
-            return
-        }
-        pending = PendingKill(row: row, force: force, advice: advice, asAdmin: false)
-    }
-
-    private func perform(_ kill: PendingKill) {
-        Task {
-            let outcome = await model.terminate(kill.row, force: kill.force, asAdmin: kill.asAdmin)
-            switch outcome {
-            case .success:
-                selection = nil
-            case .needsPrivileges:
-                // Let the first alert finish dismissing before raising the second.
-                try? await Task.sleep(nanoseconds: 250_000_000)
-                pending = PendingKill(
-                    row: kill.row, force: kill.force, advice: kill.advice, asAdmin: true
-                )
-            case .notPermitted:
-                notice = KillNotice(
-                    text: "macOS would not quit \(kill.row.name). It is protected by the system "
-                        + "and cannot be terminated, even by an administrator."
-                )
-            case .noSuchProcess:
-                notice = KillNotice(text: "\(kill.row.name) had already exited.")
-                model.refreshNow()
-            case .cancelled:
-                break
-            case .failed(let reason):
-                notice = KillNotice(
-                    text: "Could not quit \(kill.row.name).\n\n\(reason)"
-                )
-            }
-        }
-    }
 
     private var header: some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
@@ -259,8 +181,8 @@ struct MemoryView: View {
         .frame(minHeight: 200, maxHeight: .infinity)
         .contextMenu(forSelectionType: ProcessRow.ID.self) { ids in
             if let id = ids.first, let row = rows.first(where: { $0.id == id }) {
-                Button("Quit \(row.name)") { request(row, force: false) }
-                Button("Force Quit \(row.name)") { request(row, force: true) }
+                Button("Quit \(row.name)") { termination.request(row, force: false) }
+                Button("Force Quit \(row.name)") { termination.request(row, force: true) }
                 Divider()
                 Button("Copy PID") {
                     NSPasteboard.general.clearContents()
@@ -274,26 +196,11 @@ struct MemoryView: View {
     private var detail: some View {
         if let selected = rows.first(where: { $0.id == selection }) {
             ProcessDetail(row: selected) { force in
-                request(selected, force: force)
+                termination.request(selected, force: force)
             }
             .transition(.opacity)
         }
     }
-}
-
-private struct PendingKill: Identifiable {
-    let row: ProcessRow
-    let force: Bool
-    let advice: KillAdvice
-    /// Second stage: the direct signal was refused, so retry through authentication.
-    let asAdmin: Bool
-
-    var id: String { "\(row.id)-\(force)-\(asAdmin)" }
-}
-
-private struct KillNotice: Identifiable {
-    let text: String
-    var id: String { text }
 }
 
 /// Expanded information for the selected row: what the process is, where it lives,

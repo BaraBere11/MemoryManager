@@ -13,6 +13,14 @@ struct ProcessRow: Identifiable, Sendable, Hashable {
     let isEstimate: Bool
     /// Full path to the executable, shown in the detail pane.
     let path: String
+    /// Cumulative CPU time in nanoseconds, or nil when the process is not readable.
+    /// Percentages come from the delta between two samples, so a single sample alone
+    /// says nothing about current load.
+    let cpuTime: UInt64?
+    /// `ps` recent-CPU percentage, used when `cpuTime` is unavailable.
+    let cpuFallbackPercent: Double?
+    /// Filled in by whoever is diffing samples; 100 means one core fully busy.
+    var cpuPercent: Double = 0
     let explanation: ProcessExplanation
 
     var pid: pid_t { id }
@@ -38,15 +46,20 @@ enum ProcessSampler {
 
         for proc in kernelProcs {
             let path = psInfo[proc.pid]?.path ?? procPath(proc.pid)
-            let (name, owner) = prettyName(path: path, fallback: proc.comm)
+            let identity = identityCache.identity(path: path, comm: proc.comm, uid: proc.uid)
+            let name = identity.name
+            let owner = identity.owner
 
             let memory: UInt64
             let isEstimate: Bool
-            if let exact = footprint(proc.pid) {
-                memory = exact
+            let cpuTime: UInt64?
+            if let usage = resourceUsage(proc.pid) {
+                memory = usage.footprint
+                cpuTime = usage.cpuTime
                 isEstimate = false
             } else if let rss = psInfo[proc.pid]?.rss {
                 memory = rss
+                cpuTime = nil
                 isEstimate = true
             } else {
                 continue
@@ -63,12 +76,10 @@ enum ProcessSampler {
                     memory: memory,
                     isEstimate: isEstimate,
                     path: path,
-                    explanation: ProcessCatalog.explain(
-                        name: name,
-                        path: path,
-                        owner: owner,
-                        uid: proc.uid
-                    )
+                    cpuTime: cpuTime,
+                    cpuFallbackPercent: psInfo[proc.pid]?.cpu,
+                    cpuPercent: 0,
+                    explanation: identity.explanation
                 )
             )
         }
@@ -110,19 +121,39 @@ enum ProcessSampler {
 
     // MARK: - Per-process memory
 
-    /// Physical footprint — the same number Activity Monitor puts in its Memory column.
-    private static func footprint(_ pid: pid_t) -> UInt64? {
+    /// One `proc_pid_rusage` call yields both the physical footprint — the number
+    /// Activity Monitor shows as Memory — and the cumulative CPU time.
+    private static func resourceUsage(_ pid: pid_t) -> (footprint: UInt64, cpuTime: UInt64)? {
         var info = rusage_info_v4()
         let result = withUnsafeMutablePointer(to: &info) { pointer in
             pointer.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) {
                 proc_pid_rusage(pid, RUSAGE_INFO_V4, $0)
             }
         }
-        return result == 0 ? info.ri_phys_footprint : nil
+        guard result == 0 else { return nil }
+        let ticks = info.ri_user_time &+ info.ri_system_time
+        return (info.ri_phys_footprint, machTicksToNanoseconds(ticks))
+    }
+
+    /// `ri_user_time` and `ri_system_time` are mach absolute time units, not
+    /// nanoseconds. The two are identical on Intel, where the timebase is 1:1, but on
+    /// Apple silicon one tick is 125/3 ns — so skipping this conversion reports CPU
+    /// usage roughly 42x too low.
+    private static let timebase: mach_timebase_info_data_t = {
+        var info = mach_timebase_info_data_t()
+        mach_timebase_info(&info)
+        if info.numer == 0 || info.denom == 0 { return mach_timebase_info_data_t(numer: 1, denom: 1) }
+        return info
+    }()
+
+    private static func machTicksToNanoseconds(_ ticks: UInt64) -> UInt64 {
+        ticks / UInt64(timebase.denom) &* UInt64(timebase.numer)
+            &+ (ticks % UInt64(timebase.denom)) &* UInt64(timebase.numer) / UInt64(timebase.denom)
     }
 
     private struct PSEntry {
         let rss: UInt64
+        let cpu: Double
         let path: String
     }
 
@@ -130,35 +161,67 @@ enum ProcessSampler {
         guard let output = runPS() else { return [:] }
         var map: [pid_t: PSEntry] = [:]
         for line in output.split(separator: "\n") {
-            // "  1234  56789 /path/with spaces/binary"
-            let trimmed = line.drop { $0 == " " }
-            guard let pidEnd = trimmed.firstIndex(of: " "),
-                  let pid = pid_t(trimmed[trimmed.startIndex..<pidEnd])
+            // "  1234  56789   3.2 /path/with spaces/binary"
+            var rest = line.drop { $0 == " " }
+
+            func nextField() -> Substring? {
+                guard let end = rest.firstIndex(of: " ") else { return nil }
+                let field = rest[rest.startIndex..<end]
+                rest = rest[end...].drop { $0 == " " }
+                return field
+            }
+
+            guard let pidField = nextField(), let pid = pid_t(pidField),
+                  let rssField = nextField(), let rssKB = UInt64(rssField),
+                  let cpuField = nextField()
             else { continue }
-            let afterPid = trimmed[pidEnd...].drop { $0 == " " }
-            guard let rssEnd = afterPid.firstIndex(of: " "),
-                  let rssKB = UInt64(afterPid[afterPid.startIndex..<rssEnd])
-            else { continue }
-            let path = String(afterPid[rssEnd...].drop { $0 == " " })
-            map[pid] = PSEntry(rss: rssKB * 1024, path: path)
+            map[pid] = PSEntry(
+                rss: rssKB * 1024,
+                cpu: Double(cpuField) ?? 0,
+                path: String(rest)
+            )
         }
         return map
     }
 
+    /// Foundation's `Process` costs roughly 110 ms per launch here, most of it
+    /// overhead rather than `ps` itself; `posix_spawn` does the same job in about a
+    /// third of that, which matters when this runs every couple of seconds.
     private static func runPS() -> String? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/ps")
-        process.arguments = ["-axwwo", "pid=,rss=,comm="]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-        } catch {
+        var fds: [Int32] = [0, 0]
+        guard pipe(&fds) == 0 else { return nil }
+
+        var actions: posix_spawn_file_actions_t?
+        posix_spawn_file_actions_init(&actions)
+        posix_spawn_file_actions_adddup2(&actions, fds[1], 1)
+        posix_spawn_file_actions_addclose(&actions, fds[0])
+        defer { posix_spawn_file_actions_destroy(&actions) }
+
+        let argumentStrings = ["ps", "-axwwo", "pid=,rss=,pcpu=,comm="]
+        var arguments: [UnsafeMutablePointer<CChar>?] = argumentStrings.map { strdup($0) }
+        arguments.append(nil)
+        defer { for argument in arguments where argument != nil { free(argument) } }
+
+        var pid: pid_t = 0
+        let spawned = posix_spawn(&pid, "/bin/ps", &actions, nil, &arguments, environ)
+        close(fds[1])
+        guard spawned == 0 else {
+            close(fds[0])
             return nil
         }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
+
+        // Drain the pipe before waiting, or a large listing would deadlock on a full buffer.
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 65_536)
+        while true {
+            let read = Darwin.read(fds[0], &buffer, buffer.count)
+            if read <= 0 { break }
+            data.append(contentsOf: buffer[0..<read])
+        }
+        close(fds[0])
+
+        var status: Int32 = 0
+        waitpid(pid, &status, 0)
         return String(data: data, encoding: .utf8)
     }
 
@@ -170,6 +233,54 @@ enum ProcessSampler {
     }
 
     // MARK: - Naming
+
+    private static let identityCache = ProcessIdentityCache()
+    private static let userNameCache = UserNameCache()
+
+    private static func userName(_ uid: uid_t) -> String {
+        userNameCache.name(for: uid)
+    }
+}
+
+/// Naming and describing a process means splitting its path and walking the catalogue.
+/// Both depend only on the executable, not on the moment, so the result is cached per
+/// binary — with ~900 processes sharing ~650 distinct executables, and the whole table
+/// rebuilt every couple of seconds, that work is otherwise repeated for no reason.
+private final class ProcessIdentityCache: @unchecked Sendable {
+    struct Identity {
+        let name: String
+        let owner: String?
+        let explanation: ProcessExplanation
+    }
+
+    private let lock = NSLock()
+    private var entries: [String: Identity] = [:]
+
+    func identity(path: String, comm: String, uid: uid_t) -> Identity {
+        // uid participates because it affects how an unrecognised process is classified.
+        let key = "\(path)\u{0}\(comm)\u{0}\(uid)"
+
+        lock.lock()
+        if let cached = entries[key] {
+            lock.unlock()
+            return cached
+        }
+        lock.unlock()
+
+        let (name, owner) = ProcessIdentityCache.prettyName(path: path, fallback: comm)
+        let identity = Identity(
+            name: name,
+            owner: owner,
+            explanation: ProcessCatalog.explain(name: name, path: path, owner: owner, uid: uid)
+        )
+
+        lock.lock()
+        // Bounded so a machine churning through short-lived binaries cannot grow it forever.
+        if entries.count > 4096 { entries.removeAll(keepingCapacity: true) }
+        entries[key] = identity
+        lock.unlock()
+        return identity
+    }
 
     /// Turns an executable path into a name a person recognises, plus the app it belongs to.
     private static func prettyName(path: String, fallback: String) -> (name: String, owner: String?) {
@@ -185,12 +296,6 @@ enum ProcessSampler {
             return (name, nil)
         }
         return (name, String(outermost.dropLast(4)))
-    }
-
-    private static let userNameCache = UserNameCache()
-
-    private static func userName(_ uid: uid_t) -> String {
-        userNameCache.name(for: uid)
     }
 }
 

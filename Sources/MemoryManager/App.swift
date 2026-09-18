@@ -3,21 +3,24 @@ import SwiftUI
 @main
 struct MemoryManagerApp: App {
     @StateObject private var memory = MemoryModel()
+    @StateObject private var cpu = CPUModel()
     @StateObject private var disk = DiskModel()
 
     var body: some Scene {
         Window("Memory Manager - MacOS", id: "main") {
             RootView()
                 .environmentObject(memory)
+                .environmentObject(cpu)
                 .environmentObject(disk)
                 .frame(minWidth: 860, minHeight: 620)
-                .onAppear { memory.start() }
-                .onDisappear { memory.stop() }
         }
         .defaultSize(width: 1000, height: 720)
         .commands {
             CommandGroup(after: .toolbar) {
-                Button("Refresh") { memory.refreshNow() }
+                Button("Refresh") {
+                    memory.refreshNow()
+                    cpu.refreshNow()
+                }
                     .keyboardShortcut("r", modifiers: [.command, .shift])
             }
         }
@@ -26,6 +29,7 @@ struct MemoryManagerApp: App {
 
 enum AppTab: String, CaseIterable, Identifiable {
     case memory = "Memory"
+    case cpu = "CPU"
     case storage = "Storage"
 
     var id: String { rawValue }
@@ -33,6 +37,7 @@ enum AppTab: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .memory: return "memorychip"
+        case .cpu: return "cpu"
         case .storage: return "internaldrive"
         }
     }
@@ -50,13 +55,14 @@ struct RootView: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(width: 260)
+            .frame(width: 340)
             .padding(.vertical, 10)
 
             Divider()
 
             switch tab {
             case .memory: MemoryView()
+            case .cpu: CPUView()
             case .storage: DiskView()
             }
         }

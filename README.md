@@ -1,6 +1,6 @@
 # Memory Manager - MacOS
 
-A native macOS app that shows what is using your **RAM** and your **disk**, in two tabs.
+A native macOS app that shows what is using your **RAM**, your **CPU**, and your **disk**, in three tabs.
 
 Built with SwiftUI and SwiftPM. **Xcode is not required** — the Command Line Tools
 toolchain is enough.
@@ -92,6 +92,34 @@ is setuid-root and can see every process. Those rows are marked `~`, and the cou
 next to the table heading. RSS counts shared memory once per process, so those figures run
 a little high; the rest are exact.
 
+## CPU tab
+
+Live, auto-refreshing (1–5 s, selectable).
+
+- **Usage bar** — User / System / Nice / Idle, from `host_statistics(HOST_CPU_LOAD_INFO)`.
+  CPU usage only exists as a delta between two readings, so the first sample after opening
+  the tab establishes a baseline and shows nothing.
+- **Per-core meters** — one bar per logical core. On Apple silicon the performance and
+  efficiency tiers are labelled `P0…` and `E0…`, read from `hw.perflevel0/1.logicalcpu`.
+- **Load average** — 1, 5 and 15 minute figures from `getloadavg`, with a tooltip comparing
+  them against your core count, which is the number that makes them meaningful.
+- **Process table** — sorted by CPU, sharing the descriptions, `~` estimate marker and
+  Quit / Force Quit behaviour with the Memory tab.
+
+Process percentages are **of one core**, as in Activity Monitor: 100% means one core fully
+busy, and a threaded process can exceed that up to `cores × 100%`. The detail pane says so
+when a process goes above 100%.
+
+The per-process total will read a little below the system total, because `kernel_task`
+(pid 0) is not an ordinary process and some kernel time is not attributed to any process.
+
+### A note on measuring CPU time
+
+`proc_pid_rusage` reports `ri_user_time` and `ri_system_time` in **mach absolute time
+units, not nanoseconds**. On Intel the timebase is 1:1 so the two are interchangeable, but
+on Apple silicon one tick is 125/3 ns — treating ticks as nanoseconds under-reports CPU by
+about 42x. `ProcessSampler` converts through `mach_timebase_info`.
+
 ## Storage tab
 
 - **Capacity** is read instantly from the volume, with no scan — total, used, and available
@@ -167,11 +195,26 @@ System Settings → Privacy & Security.
 - Folders under 2 MB are rolled into their parent instead of being kept as separate rows.
   They still count toward every total — this only bounds how much tree is held in memory.
 
+### Cost of monitoring
+
+Sampling ~900 processes means one `ps` call plus a `proc_pid_rusage` per process, and only
+the visible tab samples. Two things keep that affordable:
+
+- `ps` is launched with `posix_spawn` rather than Foundation's `Process`, which costs about
+  110 ms per launch here against roughly 35 ms — overhead in `Process`, not in `ps`.
+- Naming and describing a process depends only on its executable, so the result is cached
+  per binary instead of being recomputed for all ~900 rows every refresh.
+
+Together those take a refresh from ~124 ms to ~49 ms.
+
 ## Layout
 
 ```
 Sources/MemoryManager/
   App.swift                  window, tab switcher
+  CPU/
+    CPUSampler.swift         host and per-core ticks, load average, core topology
+    CPUModel.swift           refresh loop and per-process CPU attribution
   Memory/
     MemorySampler.swift      host_statistics64, sysctl, swap, pressure
     ProcessSampler.swift     per-process footprint, ps fallback, naming
@@ -180,8 +223,9 @@ Sources/MemoryManager/
     VolumeSampler.swift      mounted volumes and capacity
     DiskScanner.swift        parallel tree scan, pruning, categories
     DiskModel.swift          scan lifecycle, progress, cancellation
+    TerminationUI.swift      confirm-and-quit flow shared by the Memory and CPU tabs
   Views/
-    MemoryView.swift, DiskView.swift, Components.swift
+    MemoryView.swift, CPUView.swift, DiskView.swift, Components.swift
 Resources/Info.plist         bundle metadata and permission strings
 build.sh                     build + assemble the .app
 ```

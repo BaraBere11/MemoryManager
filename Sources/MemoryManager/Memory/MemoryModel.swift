@@ -50,24 +50,6 @@ final class MemoryModel: ObservableObject {
         Task { await refresh() }
     }
 
-    /// Sends the signal, then re-samples so the row disappears without waiting for the
-    /// next tick. The admin path shows macOS's own password prompt.
-    func terminate(_ row: ProcessRow, force: Bool, asAdmin: Bool) async -> KillOutcome {
-        let pid = row.id
-        let outcome = await Task.detached(priority: .userInitiated) {
-            asAdmin
-                ? ProcessKiller.terminateAsAdmin(pid: pid, force: force)
-                : ProcessKiller.terminate(pid: pid, force: force)
-        }.value
-
-        if outcome == .success {
-            // SIGTERM is a request; give the process a moment to act on it before
-            // re-reading, or it will still be listed.
-            try? await Task.sleep(nanoseconds: 400_000_000)
-            await refresh()
-        }
-        return outcome
-    }
 
     private func restart() {
         stop()
